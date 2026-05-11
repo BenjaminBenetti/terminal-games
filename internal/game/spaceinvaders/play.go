@@ -11,7 +11,6 @@ import (
 // Tuning constants. Speeds are in pixels per second; intervals in seconds.
 const (
 	playerSpeed       = 36.0
-	playerMoveLatch   = 0.12 // keep gliding this long after the last KeyLeft/Right
 	playerFireGap     = 0.10
 	playerBulletSpeed = 70.0
 	playerExplodeDur  = 1.1
@@ -269,14 +268,13 @@ type ufoEntity struct {
 
 // playerEntity is the defender cannon at the bottom of the screen.
 type playerEntity struct {
-	x         float64 // sprite-left X
-	y         int     // sprite top Y (fixed)
-	moveDir   int     // -1, 0, +1
-	moveLatch float64 // remaining seconds the move flag stays held
-	cooldown  float64
-	bullet    *bullet // single in-flight bullet
-	lives     int
-	explodeT  float64 // remaining explosion duration; >0 means exploding
+	x        float64 // sprite-left X
+	y        int     // sprite top Y (fixed)
+	moveDir  int     // -1, 0, +1, recomputed each frame from key state
+	cooldown float64
+	bullet   *bullet // single in-flight bullet
+	lives    int
+	explodeT float64 // remaining explosion duration; >0 means exploding
 }
 
 // playScene contains the full gameplay state — entities, scoring, and the
@@ -358,7 +356,6 @@ func (p *playScene) startWave(wave int, keepBunkers bool) {
 	p.player.cooldown = 0
 	p.player.explodeT = 0
 	p.player.moveDir = 0
-	p.player.moveLatch = 0
 	p.player.x = float64(p.w-playerSprite.width()) / 2
 	p.player.y = p.playerY
 
@@ -537,24 +534,17 @@ func (p *playScene) handleInput() {
 	}
 }
 
+// handlePlayKey handles discrete (event-driven) actions during gameplay:
+// firing and quitting. Movement is held-state and polled via IsKeyDown in
+// updatePlaying, so Left/Right/A/D are intentionally absent from this
+// switch — handling them here would re-introduce the move-vs-shoot
+// conflict the latch hack used to suffer from.
 func (p *playScene) handlePlayKey(k engine.Key) {
 	switch k.Code {
-	case engine.KeyLeft:
-		p.player.moveDir = -1
-		p.player.moveLatch = playerMoveLatch
-	case engine.KeyRight:
-		p.player.moveDir = 1
-		p.player.moveLatch = playerMoveLatch
 	case engine.KeyChar:
 		switch k.Rune {
 		case ' ':
 			p.tryFire()
-		case 'a', 'A':
-			p.player.moveDir = -1
-			p.player.moveLatch = playerMoveLatch
-		case 'd', 'D':
-			p.player.moveDir = 1
-			p.player.moveLatch = playerMoveLatch
 		case 'q', 'Q':
 			p.wantQuit = true
 		}
@@ -585,12 +575,22 @@ func (p *playScene) tryFire() {
 // state: move player, aliens, and bullets, then resolve collisions.
 func (p *playScene) updatePlaying(s float64) {
 	// --- Player movement ----------------------------------------------
-	if p.player.moveLatch > 0 {
-		p.player.moveLatch -= s
-		if p.player.moveLatch <= 0 {
-			p.player.moveDir = 0
-			p.player.moveLatch = 0
-		}
+	//
+	// Movement is held-key state, so poll IsKeyDown / IsCharDown every
+	// frame rather than driving it off the discrete event queue. This is
+	// what lets the player move and shoot at the same time: the OS only
+	// auto-repeats the most-recent key (usually Space while firing), but
+	// the held arrow / WASD key still reads as down via Kitty release
+	// events (or the legacy decay fallback).
+	left := p.e.IsKeyDown(engine.KeyLeft) || p.e.IsCharDown('a') || p.e.IsCharDown('A')
+	right := p.e.IsKeyDown(engine.KeyRight) || p.e.IsCharDown('d') || p.e.IsCharDown('D')
+	switch {
+	case left && !right:
+		p.player.moveDir = -1
+	case right && !left:
+		p.player.moveDir = 1
+	default:
+		p.player.moveDir = 0
 	}
 	if p.player.moveDir != 0 {
 		p.player.x += float64(p.player.moveDir) * playerSpeed * s
