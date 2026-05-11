@@ -3,9 +3,11 @@ package engine
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"syscall"
+	"time"
 	"unicode/utf8"
 	"unsafe"
 )
@@ -53,12 +55,25 @@ const (
 	kittyKeyDown      = 57353
 )
 
-// Sequences to enable and disable the Kitty keyboard progressive
-// enhancement protocol. Flags 2 (report event types) + 8 (report all
-// keys as escape codes) = 10. Terminals that don't understand the
-// sequence silently ignore it, so this is safe to send unconditionally.
+// Sequences to enable, query, and disable the Kitty keyboard progressive
+// enhancement protocol.
+//
+// We request flags 1 (disambiguate escape codes) + 2 (report event types) +
+// 8 (report all keys as escape codes) = 11. Flag 1 is the load-bearing
+// one for arrow keys: without it functional keys stay in their legacy
+// CSI form (\x1b[A and friends), and legacy CSI has no event-type field —
+// so release events are silently dropped no matter what flag 2 says.
+// Flag 1 promotes functional keys to CSI u form where flag 2 can attach
+// the event type.
+//
+// "\x1b[?u" asks the terminal to reply with the bitmask of flags it
+// actually activated. "\x1b[c" is the Primary Device Attributes query —
+// every VT100-compatible terminal must answer it, so it serves as a
+// "fence": if we get a DA1 reply but no Kitty reply, the terminal
+// demonstrably works but doesn't speak the progressive-enhancement
+// protocol.
 const (
-	kittyEnableSequence  = "\x1b[>10u"
+	kittyEnableSequence  = "\x1b[>11u\x1b[?u\x1b[c"
 	kittyDisableSequence = "\x1b[<u"
 )
 
@@ -156,6 +171,24 @@ func (e *Engine) startInput() func() {
 			}
 		}
 	}
+	onFlags := func(flags int) {
+		e.kittyFlags.Store(int32(flags))
+	}
+	onDA := func() {
+		e.terminalReplied.Store(true)
+	}
+
+	// Opt-in raw-input log for diagnosing terminals whose key encoding
+	// the parser doesn't recognise. Set ENGINE_INPUT_LOG=/path/to/file
+	// to record every chunk of bytes read from the tty, with timestamps
+	// and Go-string-quoted contents.
+	var inputLog *os.File
+	if path := os.Getenv("ENGINE_INPUT_LOG"); path != "" {
+		if f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644); err == nil {
+			inputLog = f
+			fmt.Fprintf(inputLog, "engine input log started at %s\n", time.Now().Format(time.RFC3339))
+		}
+	}
 
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -177,8 +210,12 @@ func (e *Engine) startInput() func() {
 				return
 			}
 			if n > 0 {
+				if inputLog != nil {
+					fmt.Fprintf(inputLog, "%s read %d: %q\n",
+						time.Now().Format("15:04:05.000"), n, string(buf[:n]))
+				}
 				data := append(pending, buf[:n]...)
-				pending = parseInput(data, emit)
+				pending = parseInput(data, emit, onFlags, onDA)
 			} else if len(pending) > 0 {
 				flushPending(pending, emit)
 				pending = nil
@@ -190,6 +227,9 @@ func (e *Engine) startInput() func() {
 		<-done
 		restoreMode(uintptr(fd), orig)
 		tty.Close()
+		if inputLog != nil {
+			inputLog.Close()
+		}
 	}
 }
 
@@ -197,9 +237,14 @@ func (e *Engine) startInput() func() {
 // dispatched via emit. The event-type argument is one of kittyEventPress,
 // kittyEventRepeat, or kittyEventRelease.
 //
+// onFlags is invoked when the terminal replies to a Kitty progressive-
+// enhancement query (CSI ? N u) with the active flag bitmask. onDA is
+// invoked when the terminal replies to a Primary Device Attributes query
+// (CSI ? … c). Either may be nil.
+//
 // Trailing bytes that look like an incomplete escape sequence are returned
 // as pending so the caller can prepend them to the next read.
-func parseInput(data []byte, emit func(Key, int)) []byte {
+func parseInput(data []byte, emit func(Key, int), onFlags func(int), onDA func()) []byte {
 	i := 0
 	for i < len(data) {
 		b := data[i]
@@ -221,10 +266,31 @@ func parseInput(data []byte, emit func(Key, int)) []byte {
 				params := data[i+2 : j]
 
 				switch {
+				case final == 'u' && data[i+1] == '[' && len(params) > 0 && params[0] == '?':
+					// Kitty progressive-enhancement flags reply.
+					if onFlags != nil {
+						if flags, err := strconv.Atoi(string(params[1:])); err == nil {
+							onFlags(flags)
+						}
+					}
+				case final == 'c' && data[i+1] == '[' && len(params) > 0 && params[0] == '?':
+					// Primary DA reply (CSI ? … c) — proves the terminal
+					// is talking back to us regardless of whether it
+					// supports anything else.
+					if onDA != nil {
+						onDA()
+					}
 				case final == 'u' && data[i+1] == '[':
 					parseKittyU(params, emit)
-				case data[i+1] == 'O' || (data[i+1] == '[' && len(params) == 0):
-					handleLegacyArrow(final, emit)
+				case isArrowFinal(final) && (data[i+1] == '[' || data[i+1] == 'O'):
+					// Arrow keys come in three flavours:
+					//   - SS3: "\x1bOA"
+					//   - Plain CSI: "\x1b[A"           (press, default mods)
+					//   - Modified/event CSI: "\x1b[1;mods:eventA"
+					//     (Alacritty emits releases in this form even when
+					//     Kitty flag 1 is active, keeping the press in the
+					//     plain legacy form for backwards compatibility.)
+					handleArrowCSI(final, params, emit)
 				}
 				// Anything else: unknown CSI sequence, drop it.
 
@@ -257,19 +323,45 @@ func parseInput(data []byte, emit func(Key, int)) []byte {
 	return nil
 }
 
-// handleLegacyArrow dispatches a press event for the legacy CSI/SS3 arrow
-// final bytes A/B/C/D.
-func handleLegacyArrow(final byte, emit func(Key, int)) {
+// isArrowFinal reports whether b is one of the CSI/SS3 final bytes used
+// for the four arrow keys.
+func isArrowFinal(b byte) bool {
+	return b == 'A' || b == 'B' || b == 'C' || b == 'D'
+}
+
+// handleArrowCSI dispatches an arrow-key event from any of the three
+// forms terminals use:
+//
+//	\x1bOA              SS3 (application keypad)
+//	\x1b[A              plain CSI (press, no modifiers)
+//	\x1b[1;mods:eventA  modified/event CSI — Alacritty emits releases
+//	                    this way even when Kitty flag 1 is active, so
+//	                    we must parse the event-type field here to
+//	                    distinguish a release from a press.
+//
+// The leading "1" in the parameter section is the legacy key-parameter
+// (always 1 for arrows) and is ignored here.
+func handleArrowCSI(final byte, params []byte, emit func(Key, int)) {
+	var code KeyCode
 	switch final {
 	case 'A':
-		emit(Key{Code: KeyUp}, kittyEventPress)
+		code = KeyUp
 	case 'B':
-		emit(Key{Code: KeyDown}, kittyEventPress)
+		code = KeyDown
 	case 'C':
-		emit(Key{Code: KeyRight}, kittyEventPress)
+		code = KeyRight
 	case 'D':
-		emit(Key{Code: KeyLeft}, kittyEventPress)
+		code = KeyLeft
+	default:
+		return
 	}
+	event := kittyEventPress
+	if len(params) > 0 {
+		if _, _, ev, ok := parseKittyParams(params); ok {
+			event = ev
+		}
+	}
+	emit(Key{Code: code}, event)
 }
 
 // parseKittyU parses the parameters of a Kitty CSI u sequence and emits the

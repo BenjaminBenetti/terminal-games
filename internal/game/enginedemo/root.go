@@ -37,6 +37,7 @@ func newRoot(e *engine.Engine) *root {
 		{"BOUNCING BALL", newBouncingBallDemo},
 		{"SHAPES", newShapesDemo},
 		{"PLASMA", newPlasmaDemo},
+		{"MULTI-KEY", func() demoScene { return newKeysDemo(e) }},
 		{"CAT", newCatDemo},
 	}
 	names := make([]string, len(r.demos))

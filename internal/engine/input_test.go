@@ -13,7 +13,7 @@ func collectAll(t *testing.T, data []byte) []Key {
 			keys = append(keys, k)
 		}
 	}
-	pending := parseInput(data, emit)
+	pending := parseInput(data, emit, nil, nil)
 	flushPending(pending, emit)
 	return keys
 }
@@ -33,6 +33,52 @@ func TestParseInputArrowKeysCSI(t *testing.T) {
 		if len(got) != 1 || got[0].Code != tc.want {
 			t.Errorf("parseInput(%q) = %+v, want one %v", tc.seq, got, tc.want)
 		}
+	}
+}
+
+func TestParseInputArrowReleaseHybridLegacy(t *testing.T) {
+	// Alacritty (and similar) keeps arrow presses in the plain legacy
+	// form but tacks a Kitty-style ;mods:event field onto releases:
+	//   press:   "\x1b[A"
+	//   release: "\x1b[1;1:3A"
+	// The parser must treat the release as event-type 3, not as an
+	// unknown CSI to be dropped.
+	cases := []struct {
+		seq  []byte
+		code KeyCode
+	}{
+		{[]byte("\x1b[1;1:3A"), KeyUp},
+		{[]byte("\x1b[1;1:3B"), KeyDown},
+		{[]byte("\x1b[1;1:3C"), KeyRight},
+		{[]byte("\x1b[1;1:3D"), KeyLeft},
+	}
+	for _, tc := range cases {
+		type ev struct {
+			k Key
+			e int
+		}
+		var got []ev
+		emit := func(k Key, e int) { got = append(got, ev{k, e}) }
+		parseInput(tc.seq, emit, nil, nil)
+		if len(got) != 1 {
+			t.Errorf("parseInput(%q): got %d events, want 1: %+v", tc.seq, len(got), got)
+			continue
+		}
+		if got[0].k.Code != tc.code {
+			t.Errorf("parseInput(%q): got code %v, want %v", tc.seq, got[0].k.Code, tc.code)
+		}
+		if got[0].e != kittyEventRelease {
+			t.Errorf("parseInput(%q): got event %d, want %d (release)", tc.seq, got[0].e, kittyEventRelease)
+		}
+	}
+}
+
+func TestParseInputArrowModifiedPressLegacy(t *testing.T) {
+	// "\x1b[1;2A" is Shift+Up legacy form: parameters present but no
+	// event-type — should still register as a plain press.
+	got := collectAll(t, []byte("\x1b[1;2A"))
+	if len(got) != 1 || got[0].Code != KeyUp {
+		t.Errorf("got %+v, want one KeyUp press", got)
 	}
 }
 
@@ -61,7 +107,7 @@ func TestParseInputArrowKeySplitAcrossReads(t *testing.T) {
 			keys = append(keys, k)
 		}
 	}
-	pending := parseInput([]byte{0x1b}, emit)
+	pending := parseInput([]byte{0x1b}, emit, nil, nil)
 	if len(pending) != 1 || pending[0] != 0x1b {
 		t.Fatalf("first read pending = %v, want [0x1b]", pending)
 	}
@@ -69,7 +115,7 @@ func TestParseInputArrowKeySplitAcrossReads(t *testing.T) {
 		t.Fatalf("first read emitted %d keys, want 0", len(keys))
 	}
 	combined := append(pending, []byte("[A")...)
-	pending = parseInput(combined, emit)
+	pending = parseInput(combined, emit, nil, nil)
 	if pending != nil {
 		t.Errorf("after complete sequence pending = %v, want nil", pending)
 	}
@@ -184,6 +230,66 @@ func TestParseInputKittyRepeatEmitsAsPress(t *testing.T) {
 	}
 }
 
+func TestParseInputKittyFlagsReply(t *testing.T) {
+	// CSI ? <flags> u — terminal's response to our \x1b[?u query.
+	var keys []Key
+	gotFlags := -2 // sentinel: callback not called yet
+	emit := func(k Key, _ int) { keys = append(keys, k) }
+	onFlags := func(f int) { gotFlags = f }
+
+	parseInput([]byte("\x1b[?11u"), emit, onFlags, nil)
+
+	if gotFlags != 11 {
+		t.Errorf("onFlags called with %d, want 11", gotFlags)
+	}
+	if len(keys) != 0 {
+		t.Errorf("flags reply leaked as key events: %+v", keys)
+	}
+}
+
+func TestParseInputKittyFlagsReplyZero(t *testing.T) {
+	gotFlags := -2
+	onFlags := func(f int) { gotFlags = f }
+
+	parseInput([]byte("\x1b[?0u"), func(Key, int) {}, onFlags, nil)
+
+	if gotFlags != 0 {
+		t.Errorf("onFlags = %d, want 0", gotFlags)
+	}
+}
+
+func TestParseInputKittyFlagsCallbacksOptional(t *testing.T) {
+	// Passing nil for either reply callback must not panic.
+	parseInput([]byte("\x1b[?11u\x1b[?62;c"), func(Key, int) {}, nil, nil)
+}
+
+func TestParseInputDA1Reply(t *testing.T) {
+	// CSI ? <list> c — Primary Device Attributes reply.
+	var keys []Key
+	calls := 0
+	emit := func(k Key, _ int) { keys = append(keys, k) }
+	onDA := func() { calls++ }
+
+	parseInput([]byte("\x1b[?62;1;6c"), emit, nil, onDA)
+
+	if calls != 1 {
+		t.Errorf("onDA called %d times, want 1", calls)
+	}
+	if len(keys) != 0 {
+		t.Errorf("DA reply leaked as key events: %+v", keys)
+	}
+}
+
+func TestParseInputDA1ShortReply(t *testing.T) {
+	// Even the minimal `\x1b[?6c` form must trigger the callback.
+	calls := 0
+	onDA := func() { calls++ }
+	parseInput([]byte("\x1b[?6c"), func(Key, int) {}, nil, onDA)
+	if calls != 1 {
+		t.Errorf("onDA called %d times, want 1", calls)
+	}
+}
+
 func TestParseInputKittySpecialKeysByCodepoint(t *testing.T) {
 	cases := []struct {
 		seq  []byte
@@ -252,6 +358,55 @@ func TestIsCharDownTracksChars(t *testing.T) {
 	e.recordKey(Key{Code: KeyChar, Rune: 'w'}, kittyEventRelease)
 	if e.IsCharDown('w') {
 		t.Errorf("after release 'w' should be up")
+	}
+}
+
+func TestIsKeyDownKittyModeIgnoresDecay(t *testing.T) {
+	// In Kitty mode the OS only auto-repeats the most-recently pressed
+	// key, so a co-held first key gets no events for the duration of the
+	// hold. We must trust release events and skip the decay timer, or
+	// diagonals fall apart after a few hundred ms.
+	e := &Engine{}
+	e.kittyFlags.Store(11) // flag 2 is set → kittyEventsActive() == true
+
+	e.recordKey(Key{Code: KeyUp}, kittyEventPress)
+	if !e.IsKeyDown(KeyUp) {
+		t.Fatal("KeyUp should be down right after press")
+	}
+
+	// Backdate lastSeen well past keyHoldDecay; without our Kitty-mode
+	// bypass this would falsely return false.
+	e.pressedMu.Lock()
+	e.pressedKeys[KeyUp].lastSeen = time.Now().Add(-time.Hour)
+	e.pressedMu.Unlock()
+
+	if !e.IsKeyDown(KeyUp) {
+		t.Errorf("KeyUp should still be down in Kitty mode regardless of decay")
+	}
+
+	// An explicit release event must still take effect.
+	e.recordKey(Key{Code: KeyUp}, kittyEventRelease)
+	if e.IsKeyDown(KeyUp) {
+		t.Errorf("KeyUp should be up after release event")
+	}
+}
+
+func TestIsKeyDownKittyDetectedViaSeenRelease(t *testing.T) {
+	// Even if KittyKeyboardFlags() hasn't reported yet, observing a
+	// release in practice should bypass decay from then on.
+	e := &Engine{}
+	e.recordKey(Key{Code: KeyUp}, kittyEventPress)
+	e.recordKey(Key{Code: KeyRight}, kittyEventPress)
+	// A release for any key proves the terminal sends them.
+	e.recordKey(Key{Code: KeyRight}, kittyEventRelease)
+
+	// Now backdate Up; should still register as down.
+	e.pressedMu.Lock()
+	e.pressedKeys[KeyUp].lastSeen = time.Now().Add(-time.Hour)
+	e.pressedMu.Unlock()
+
+	if !e.IsKeyDown(KeyUp) {
+		t.Errorf("KeyUp should remain down once we've seen a release event")
 	}
 }
 
