@@ -58,7 +58,28 @@ type Engine struct {
 	stopOnce sync.Once
 
 	inputCh chan Key
+
+	pressedMu    sync.Mutex
+	pressedKeys  map[KeyCode]*keyState
+	pressedChars map[rune]*keyState
 }
+
+// keyState tracks how recently a key was reported as held. On terminals
+// that support the Kitty keyboard protocol, released is flipped to true
+// when a release event arrives. On legacy terminals (no release events),
+// released stays false and a key is considered "up" only after no
+// press/repeat event has been seen for keyHoldDecay.
+type keyState struct {
+	lastSeen time.Time
+	released bool
+}
+
+// keyHoldDecay is the legacy-terminal fallback timeout: how long a key is
+// considered "still held" after the last press/repeat event with no
+// explicit release. The kernel's keyboard auto-repeat delay is typically
+// 250–500 ms, so we pick a value comfortably above that so a freshly held
+// key doesn't flicker to "released" before auto-repeat kicks in.
+const keyHoldDecay = 600 * time.Millisecond
 
 // New constructs an Engine from opts.
 func New(opts Options) (*Engine, error) {
@@ -103,6 +124,78 @@ func (e *Engine) FPS() int { return e.fps }
 // from any goroutine and multiple times.
 func (e *Engine) Stop() {
 	e.stopOnce.Do(func() { close(e.stopCh) })
+}
+
+// IsKeyDown reports whether the given non-character key (KeyUp, KeyEsc,
+// KeyEnter, …) is currently held. On terminals that support the Kitty
+// keyboard protocol the result is driven by explicit press/release events,
+// so simultaneous keypresses (e.g. KeyUp + KeyRight for diagonal movement)
+// are reported accurately. On older terminals the engine falls back to an
+// auto-repeat heuristic: a key is "down" while press or repeat events keep
+// arriving and decays to "up" after ~600 ms of silence.
+//
+// Use IsCharDown for printable characters like 'w' or '1'.
+//
+// Safe to call from any goroutine — typically from Scene.Update.
+func (e *Engine) IsKeyDown(code KeyCode) bool {
+	if code == KeyChar {
+		return false
+	}
+	e.pressedMu.Lock()
+	defer e.pressedMu.Unlock()
+	return isStateDown(e.pressedKeys[code])
+}
+
+// IsCharDown reports whether the given printable character key is currently
+// held. See IsKeyDown for the difference between Kitty-mode and legacy
+// behaviour.
+func (e *Engine) IsCharDown(r rune) bool {
+	e.pressedMu.Lock()
+	defer e.pressedMu.Unlock()
+	return isStateDown(e.pressedChars[r])
+}
+
+func isStateDown(st *keyState) bool {
+	if st == nil || st.lastSeen.IsZero() {
+		return false
+	}
+	if st.released {
+		return false
+	}
+	return time.Since(st.lastSeen) < keyHoldDecay
+}
+
+// recordKey updates the pressed-state map for a parsed key event. Called
+// by the input goroutine for every press/repeat/release.
+func (e *Engine) recordKey(k Key, eventType int) {
+	e.pressedMu.Lock()
+	defer e.pressedMu.Unlock()
+	var st *keyState
+	if k.Code == KeyChar {
+		if e.pressedChars == nil {
+			e.pressedChars = make(map[rune]*keyState)
+		}
+		st = e.pressedChars[k.Rune]
+		if st == nil {
+			st = &keyState{}
+			e.pressedChars[k.Rune] = st
+		}
+	} else {
+		if e.pressedKeys == nil {
+			e.pressedKeys = make(map[KeyCode]*keyState)
+		}
+		st = e.pressedKeys[k.Code]
+		if st == nil {
+			st = &keyState{}
+			e.pressedKeys[k.Code] = st
+		}
+	}
+	if eventType == kittyEventRelease {
+		st.released = true
+		return
+	}
+	st.lastSeen = time.Now()
+	st.released = false
 }
 
 // Run blocks, ticking the scene at the target frame rate. It enters the
@@ -169,13 +262,17 @@ func (e *Engine) tick(scene Scene, dt time.Duration) (done bool, err error) {
 
 // enter switches to the alternate screen buffer, hides the cursor, disables
 // application cursor-key mode (DECCKM) so arrows arrive as CSI sequences,
-// and clears the screen.
+// clears the screen, and pushes the Kitty keyboard progressive-enhancement
+// flags so we get press/release events on terminals that support them.
+// Terminals that don't recognise the Kitty sequence silently ignore it.
 func (e *Engine) enter() error {
-	_, err := fmt.Fprint(e.out, "\x1b[?1049h\x1b[?25l\x1b[?1l\x1b[2J\x1b[H")
+	_, err := fmt.Fprint(e.out,
+		"\x1b[?1049h\x1b[?25l\x1b[?1l\x1b[2J\x1b[H"+kittyEnableSequence)
 	return err
 }
 
-// exit restores the previous screen and cursor.
+// exit pops the Kitty keyboard stack, restores the previous screen, and
+// shows the cursor.
 func (e *Engine) exit() {
-	fmt.Fprint(e.out, "\x1b[0m\x1b[?25h\x1b[?1049l")
+	fmt.Fprint(e.out, kittyDisableSequence+"\x1b[0m\x1b[?25h\x1b[?1049l")
 }

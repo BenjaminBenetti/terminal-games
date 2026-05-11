@@ -1,8 +1,10 @@
 package engine
 
 import (
+	"bytes"
 	"errors"
 	"os"
+	"strconv"
 	"syscall"
 	"unicode/utf8"
 	"unsafe"
@@ -31,8 +33,41 @@ type Key struct {
 	Rune rune
 }
 
-// PollKey returns the next pending key, or (Key{}, false) if none. It never
-// blocks. Safe to call from any goroutine.
+// Kitty keyboard protocol event types.
+const (
+	kittyEventPress   = 1
+	kittyEventRepeat  = 2
+	kittyEventRelease = 3
+)
+
+// Kitty keyboard protocol functional key codepoints (subset we care about).
+// Reference: https://sw.kovidgoyal.net/kitty/keyboard-protocol/#functional-key-definitions
+const (
+	kittyKeyEsc       = 27
+	kittyKeyEnter     = 13
+	kittyKeyTab       = 9
+	kittyKeyBackspace = 127
+	kittyKeyLeft      = 57350
+	kittyKeyRight     = 57351
+	kittyKeyUp        = 57352
+	kittyKeyDown      = 57353
+)
+
+// Sequences to enable and disable the Kitty keyboard progressive
+// enhancement protocol. Flags 2 (report event types) + 8 (report all
+// keys as escape codes) = 10. Terminals that don't understand the
+// sequence silently ignore it, so this is safe to send unconditionally.
+const (
+	kittyEnableSequence  = "\x1b[>10u"
+	kittyDisableSequence = "\x1b[<u"
+)
+
+// PollKey returns the next pending key press, or (Key{}, false) if none.
+// It never blocks. Safe to call from any goroutine.
+//
+// Only press and auto-repeat events are queued — releases update the
+// internal pressed-state map (used by IsKeyDown / IsCharDown) without
+// being reported as discrete key events.
 func (e *Engine) PollKey() (Key, bool) {
 	select {
 	case k := <-e.inputCh:
@@ -84,17 +119,17 @@ func restoreMode(fd uintptr, orig syscall.Termios) {
 	)
 }
 
-// startInput opens the controlling terminal (/dev/tty), puts it in
-// non-canonical mode, and spawns a goroutine that decodes key events into
-// e.inputCh. The returned cleanup function stops the reader, restores the
-// original terminal state, and closes the tty handle.
+// startInput opens /dev/tty, sets non-canonical mode, and spawns a goroutine
+// that decodes key events. Each parsed event is dispatched through a local
+// emit closure that updates the Engine's pressed-state map and (for press /
+// repeat events) queues the Key on e.inputCh for PollKey.
+//
+// The returned cleanup function stops the reader, restores the original
+// terminal state, and closes the tty handle.
 //
 // Reading via /dev/tty (rather than os.Stdin) sidesteps the Go runtime's
 // poller, which can hold stdin in non-blocking mode and silently break the
 // VMIN/VTIME contract we rely on.
-//
-// If /dev/tty cannot be opened (e.g. stdin/stdout aren't a real terminal),
-// startInput is a no-op and cleanup is a harmless noop.
 func (e *Engine) startInput() func() {
 	tty, err := os.OpenFile("/dev/tty", os.O_RDONLY|syscall.O_NOCTTY, 0)
 	if err != nil {
@@ -105,13 +140,21 @@ func (e *Engine) startInput() func() {
 		tty.Close()
 		return func() {}
 	}
-	// Belt-and-suspenders: make sure the descriptor is blocking so VMIN/VTIME
-	// take effect.
 	_ = syscall.SetNonblock(fd, false)
 	orig, err := makeRaw(uintptr(fd))
 	if err != nil {
 		tty.Close()
 		return func() {}
+	}
+
+	emit := func(k Key, eventType int) {
+		e.recordKey(k, eventType)
+		if eventType == kittyEventPress || eventType == kittyEventRepeat {
+			select {
+			case e.inputCh <- k:
+			default:
+			}
+		}
 	}
 
 	stop := make(chan struct{})
@@ -135,9 +178,9 @@ func (e *Engine) startInput() func() {
 			}
 			if n > 0 {
 				data := append(pending, buf[:n]...)
-				pending = parseInput(data, e.inputCh)
+				pending = parseInput(data, emit)
 			} else if len(pending) > 0 {
-				flushPending(pending, e.inputCh)
+				flushPending(pending, emit)
 				pending = nil
 			}
 		}
@@ -150,74 +193,56 @@ func (e *Engine) startInput() func() {
 	}
 }
 
-// parseInput decodes a chunk of raw terminal bytes into Key events.
+// parseInput parses a chunk of raw terminal bytes into key events,
+// dispatched via emit. The event-type argument is one of kittyEventPress,
+// kittyEventRepeat, or kittyEventRelease.
 //
-// If data ends mid-escape-sequence (e.g. just "\x1b" or "\x1b["), the
-// trailing bytes are returned as pending so the caller can prepend them
-// to the next read. Otherwise the return value is nil.
-func parseInput(data []byte, out chan<- Key) []byte {
+// Trailing bytes that look like an incomplete escape sequence are returned
+// as pending so the caller can prepend them to the next read.
+func parseInput(data []byte, emit func(Key, int)) []byte {
 	i := 0
 	for i < len(data) {
 		b := data[i]
 		switch {
 		case b == 0x1b:
-			// Could be CSI ("ESC ["), SS3 ("ESC O"), or a bare ESC.
 			if i+1 >= len(data) {
 				return data[i:]
 			}
 			if data[i+1] == '[' || data[i+1] == 'O' {
-				if i+2 >= len(data) {
+				// Scan for the CSI/SS3 final byte.
+				j := i + 2
+				for j < len(data) && !isCSIFinal(data[j]) {
+					j++
+				}
+				if j >= len(data) {
 					return data[i:]
 				}
-				switch data[i+2] {
-				case 'A':
-					sendKey(out, Key{Code: KeyUp})
-					i += 3
-					continue
-				case 'B':
-					sendKey(out, Key{Code: KeyDown})
-					i += 3
-					continue
-				case 'C':
-					sendKey(out, Key{Code: KeyRight})
-					i += 3
-					continue
-				case 'D':
-					sendKey(out, Key{Code: KeyLeft})
-					i += 3
-					continue
+				final := data[j]
+				params := data[i+2 : j]
+
+				switch {
+				case final == 'u' && data[i+1] == '[':
+					parseKittyU(params, emit)
+				case data[i+1] == 'O' || (data[i+1] == '[' && len(params) == 0):
+					handleLegacyArrow(final, emit)
 				}
-				if data[i+1] == '[' {
-					// Unknown CSI: skip until a final byte.
-					j := i + 2
-					for j < len(data) && !isCSIFinal(data[j]) {
-						j++
-					}
-					if j >= len(data) {
-						return data[i:]
-					}
-					i = j + 1
-					continue
-				}
-				// Unknown SS3 sequence.
-				i += 3
+				// Anything else: unknown CSI sequence, drop it.
+
+				i = j + 1
 				continue
 			}
-			// ESC followed by something that isn't [ or O: emit a bare ESC
-			// and let the next byte be parsed on its own.
-			sendKey(out, Key{Code: KeyEsc})
+			emit(Key{Code: KeyEsc}, kittyEventPress)
 			i++
 		case b == '\r', b == '\n':
-			sendKey(out, Key{Code: KeyEnter})
+			emit(Key{Code: KeyEnter}, kittyEventPress)
 			i++
 		case b == '\t':
-			sendKey(out, Key{Code: KeyTab})
+			emit(Key{Code: KeyTab}, kittyEventPress)
 			i++
 		case b == 0x7f, b == '\b':
-			sendKey(out, Key{Code: KeyBackspace})
+			emit(Key{Code: KeyBackspace}, kittyEventPress)
 			i++
 		case b < 0x20:
-			// Other control bytes (handled separately, e.g. Ctrl-C via SIGINT).
 			i++
 		default:
 			r, size := utf8.DecodeRune(data[i:])
@@ -225,27 +250,151 @@ func parseInput(data []byte, out chan<- Key) []byte {
 				i++
 				continue
 			}
-			sendKey(out, Key{Code: KeyChar, Rune: r})
+			emit(Key{Code: KeyChar, Rune: r}, kittyEventPress)
 			i += size
 		}
 	}
 	return nil
 }
 
+// handleLegacyArrow dispatches a press event for the legacy CSI/SS3 arrow
+// final bytes A/B/C/D.
+func handleLegacyArrow(final byte, emit func(Key, int)) {
+	switch final {
+	case 'A':
+		emit(Key{Code: KeyUp}, kittyEventPress)
+	case 'B':
+		emit(Key{Code: KeyDown}, kittyEventPress)
+	case 'C':
+		emit(Key{Code: KeyRight}, kittyEventPress)
+	case 'D':
+		emit(Key{Code: KeyLeft}, kittyEventPress)
+	}
+}
+
+// parseKittyU parses the parameters of a Kitty CSI u sequence and emits the
+// resulting key event. The parameter format is
+//
+//	codepoint[:alt][;modifiers[:event-type]][;text]
+//
+// Only the codepoint, modifier-shift bit, and event type are interpreted.
+// Codepoints in the Kitty functional-key range map to KeyUp/Down/etc.;
+// ordinary Unicode codepoints become KeyChar.
+func parseKittyU(params []byte, emit func(Key, int)) {
+	cp, mods, event, ok := parseKittyParams(params)
+	if !ok {
+		return
+	}
+
+	var key Key
+	switch cp {
+	case kittyKeyEsc:
+		key = Key{Code: KeyEsc}
+	case kittyKeyEnter:
+		key = Key{Code: KeyEnter}
+	case kittyKeyTab:
+		key = Key{Code: KeyTab}
+	case kittyKeyBackspace:
+		key = Key{Code: KeyBackspace}
+	case kittyKeyUp:
+		key = Key{Code: KeyUp}
+	case kittyKeyDown:
+		key = Key{Code: KeyDown}
+	case kittyKeyLeft:
+		key = Key{Code: KeyLeft}
+	case kittyKeyRight:
+		key = Key{Code: KeyRight}
+	default:
+		if cp < 0x20 || cp > 0x10FFFF {
+			return
+		}
+		key = Key{Code: KeyChar, Rune: kittyCanonicalRune(cp, mods)}
+	}
+	emit(key, event)
+}
+
+// parseKittyParams pulls codepoint, modifiers, and event-type out of a
+// Kitty CSI u parameter string. mods defaults to 1 (no modifiers) and
+// event defaults to 1 (press) when their respective fields are missing.
+func parseKittyParams(params []byte) (cp, mods, event int, ok bool) {
+	mods = 1
+	event = kittyEventPress
+
+	rest := params
+	semi := bytes.IndexByte(rest, ';')
+	cpSection := rest
+	if semi >= 0 {
+		cpSection = rest[:semi]
+		rest = rest[semi+1:]
+	} else {
+		rest = nil
+	}
+	// The codepoint section may include ":alt-codepoints" — only the part
+	// before the first colon is the primary codepoint.
+	if colon := bytes.IndexByte(cpSection, ':'); colon >= 0 {
+		cpSection = cpSection[:colon]
+	}
+	if len(cpSection) == 0 {
+		return 0, 0, 0, false
+	}
+	v, err := strconv.Atoi(string(cpSection))
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	cp = v
+
+	if rest == nil {
+		return cp, mods, event, true
+	}
+
+	// Drop any trailing ;text section.
+	if semi := bytes.IndexByte(rest, ';'); semi >= 0 {
+		rest = rest[:semi]
+	}
+	modsPart := rest
+	var eventPart []byte
+	if colon := bytes.IndexByte(rest, ':'); colon >= 0 {
+		modsPart = rest[:colon]
+		eventPart = rest[colon+1:]
+	}
+	if len(modsPart) > 0 {
+		if m, err := strconv.Atoi(string(modsPart)); err == nil {
+			mods = m
+		}
+	}
+	if len(eventPart) > 0 {
+		if e, err := strconv.Atoi(string(eventPart)); err == nil {
+			event = e
+		}
+	}
+	return cp, mods, event, true
+}
+
+// kittyCanonicalRune produces the visible character for a Kitty-reported
+// keypress. Kitty reports the *unshifted* codepoint plus a modifier mask,
+// so we apply the shift bit ourselves for ASCII letters to keep "A"
+// distinct from "a" in PollKey output. Other layout-dependent
+// transformations (Shift+1 → "!", AltGr layers, etc.) require flag 16
+// (text reporting) which we don't enable.
+func kittyCanonicalRune(cp int, mods int) rune {
+	flags := mods - 1
+	if flags < 0 {
+		flags = 0
+	}
+	shift := flags&1 != 0
+	if shift && cp >= 'a' && cp <= 'z' {
+		return rune(cp - 32)
+	}
+	return rune(cp)
+}
+
 // flushPending emits a bare KeyEsc for any pending bytes (which always
 // start with ESC since that's the only sequence parseInput defers on).
 // Trailing bytes after the ESC are discarded — they were part of an
 // unrecognised or aborted escape sequence.
-func flushPending(data []byte, out chan<- Key) {
+func flushPending(data []byte, emit func(Key, int)) {
 	if len(data) > 0 && data[0] == 0x1b {
-		sendKey(out, Key{Code: KeyEsc})
-	}
-}
-
-func sendKey(out chan<- Key, k Key) {
-	select {
-	case out <- k:
-	default:
+		emit(Key{Code: KeyEsc}, kittyEventPress)
 	}
 }
 
