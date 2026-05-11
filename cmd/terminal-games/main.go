@@ -2,8 +2,9 @@
 //
 // Usage:
 //
+//	terminal-games               – open the interactive game picker
 //	terminal-games list          – list all available games
-//	terminal-games <game>        – launch the named game
+//	terminal-games <game>        – launch the named game directly
 package main
 
 import (
@@ -14,6 +15,7 @@ import (
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/enginedemo"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/spaceinvaders"
 
+	"github.com/BenjaminBenetti/terminal-games/internal/engine"
 	"github.com/BenjaminBenetti/terminal-games/internal/registry"
 )
 
@@ -26,8 +28,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		printUsage()
-		return nil
+		return launchPicker()
 	}
 
 	switch args[0] {
@@ -62,12 +63,49 @@ func launchGame(name string) error {
 	return g.Run()
 }
 
+// hiddenInPicker lists registered games that shouldn't appear in the
+// interactive picker (they're still launchable by name and via `list`).
+// Currently this is just the engine demo, which is a developer tool
+// rather than a game.
+var hiddenInPicker = map[string]bool{
+	"enginedemo": true,
+}
+
+// launchPicker shows the interactive game picker. If the user picks a
+// game, the picker's engine exits cleanly and we delegate to launchGame
+// so the picked game gets its own fresh engine instance.
+func launchPicker() error {
+	all := registry.List()
+	games := make([]registry.Game, 0, len(all))
+	for _, g := range all {
+		if hiddenInPicker[g.Name()] {
+			continue
+		}
+		games = append(games, g)
+	}
+	if len(games) == 0 {
+		fmt.Println("No games are currently available.")
+		return nil
+	}
+	e, err := engine.New(engine.Options{})
+	if err != nil {
+		return err
+	}
+	picker := newPickerScene(e, games)
+	if err := e.Run(picker); err != nil {
+		return err
+	}
+	if picker.picked == "" {
+		return nil
+	}
+	return launchGame(picker.picked)
+}
+
 func printUsage() {
 	fmt.Println(`terminal-games – play games in your terminal
 
 Usage:
-  terminal-games list       list all available games
-  terminal-games <game>     launch the named game
-
-Run 'terminal-games list' to see the available games.`)
+  terminal-games             open the interactive game picker
+  terminal-games list        list all available games
+  terminal-games <game>      launch the named game directly`)
 }
