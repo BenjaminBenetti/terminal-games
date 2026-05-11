@@ -11,8 +11,7 @@ import (
 	"os"
 
 	// Blank-import game packages here so their init() functions register them.
-	// Example:
-	//   _ "github.com/BenjaminBenetti/terminal-games/internal/game/snake"
+	_ "github.com/BenjaminBenetti/terminal-games/internal/game/enginedemo"
 
 	"github.com/BenjaminBenetti/terminal-games/internal/registry"
 )
