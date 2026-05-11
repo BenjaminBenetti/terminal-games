@@ -6,19 +6,18 @@ set -euo pipefail
 
 REPO="BenjaminBenetti/terminal-games"
 
-case "$(uname -s)" in
-  Linux)  os=linux ;;
-  Darwin) os=darwin ;;
-  *) echo "terminal-games: unsupported OS: $(uname -s)" >&2; exit 1 ;;
-esac
+if [ "$(uname -s)" != "Linux" ]; then
+  echo "terminal-games: Linux only (got $(uname -s))" >&2
+  exit 1
+fi
 
 case "$(uname -m)" in
   x86_64|amd64)  arch=amd64 ;;
-  arm64|aarch64) arch=arm64 ;;
+  aarch64|arm64) arch=arm64 ;;
   *) echo "terminal-games: unsupported architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
-asset="terminal-games-${os}-${arch}"
+asset="terminal-games-linux-${arch}"
 url="https://github.com/${REPO}/releases/latest/download/${asset}"
 
 dir=$(mktemp -d /tmp/terminal-games-XXXXXX)
