@@ -69,8 +69,8 @@ func TestList(t *testing.T) {
 
 	// Verify all expected games are present.
 	found := map[string]bool{}
-	for _, n := range names {
-		found[n] = true
+	for _, name := range names {
+		found[name] = true
 	}
 	for _, want := range []string{"pong", "tetris", "asteroids"} {
 		if !found[want] {
