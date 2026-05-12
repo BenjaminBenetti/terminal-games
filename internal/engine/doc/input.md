@@ -66,9 +66,12 @@ That depends on the terminal:
 - **Legacy terminals** only send press events; releases never arrive.
   The engine falls back to an auto-repeat heuristic: a key is "down"
   while press or repeat events keep arriving, decaying to "up" after
-  ~600 ms of silence (`keyHoldDecay`). The kernel's initial auto-repeat
+  ~250 ms of silence (`keyHoldDecay`). The kernel's initial auto-repeat
   delay is typically 250–500 ms, so holding a key briefly may register
-  as "down" for ~600 ms past actual release, but combos work.
+  as "up" for a moment before auto-repeat kicks in, and a released key
+  may register as "down" for up to ~250 ms after release — short enough
+  to feel responsive but long enough that auto-repeating keys don't
+  flicker.
 
 The engine asks for the Kitty protocol on entry by sending
 `\x1b[>10u` (flags 2 + 8: report event types + report all keys as
