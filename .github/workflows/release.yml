@@ -1,0 +1,38 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build terminal-games
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags='-s -w' \
+            -o dist/terminal-games-linux-${{ matrix.arch }} \
+            ./cmd/terminal-games
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/terminal-games-linux-${{ matrix.arch }}
+          fail_on_unmatched_files: true
