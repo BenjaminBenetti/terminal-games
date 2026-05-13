@@ -16,6 +16,7 @@ import (
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/brickbreaker"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/enginedemo"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/galaxian"
+	_ "github.com/BenjaminBenetti/terminal-games/internal/game/pacman"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/pong"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/spaceinvaders"
 
