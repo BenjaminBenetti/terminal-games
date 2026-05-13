@@ -14,6 +14,7 @@ import (
 	// Blank-import game packages here so their init() functions register them.
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/asteroids"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/brickbreaker"
+	_ "github.com/BenjaminBenetti/terminal-games/internal/game/centipede"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/donkeykong"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/enginedemo"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/flappybird"
