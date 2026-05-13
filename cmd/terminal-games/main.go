@@ -73,9 +73,14 @@ var hiddenInPicker = map[string]bool{
 	"enginedemo": true,
 }
 
-// launchPicker shows the interactive game picker. If the user picks a
-// game, the picker's engine exits cleanly and we delegate to launchGame
-// so the picked game gets its own fresh engine instance.
+// launchPicker shows the interactive game picker, then runs whichever
+// game the user picks. When the game exits, control returns to the
+// picker so the user can pick another game (or quit). The cursor
+// defaults to the most recently played game on each re-entry.
+//
+// The picker and each game run on their own engine instances — fresh
+// alt-screen + raw-mode setup each time — so any state from a previous
+// game is fully cleared before the next one starts.
 func launchPicker() error {
 	all := registry.List()
 	games := make([]registry.Game, 0, len(all))
@@ -89,18 +94,33 @@ func launchPicker() error {
 		fmt.Println("No games are currently available.")
 		return nil
 	}
-	e, err := engine.New(engine.Options{})
-	if err != nil {
-		return err
+
+	var lastPicked string
+	for {
+		e, err := engine.New(engine.Options{})
+		if err != nil {
+			return err
+		}
+		picker := newPickerScene(e, games)
+		if lastPicked != "" {
+			for i, g := range games {
+				if g.Name() == lastPicked {
+					picker.selected = i
+					break
+				}
+			}
+		}
+		if err := e.Run(picker); err != nil {
+			return err
+		}
+		if picker.picked == "" {
+			return nil
+		}
+		lastPicked = picker.picked
+		if err := launchGame(picker.picked); err != nil {
+			return err
+		}
 	}
-	picker := newPickerScene(e, games)
-	if err := e.Run(picker); err != nil {
-		return err
-	}
-	if picker.picked == "" {
-		return nil
-	}
-	return launchGame(picker.picked)
 }
 
 func printUsage() {

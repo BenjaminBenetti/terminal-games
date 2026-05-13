@@ -17,13 +17,31 @@ type pickerScene struct {
 	selected int
 	viewport int
 	picked   string // name of the selected game, or "" if the user quit
+
+	// startTime is set on the first Update call. We use it to delay the
+	// "kitty kbd not detected" warning by a short grace period so a
+	// supporting terminal's flags reply has time to arrive before we
+	// decide nothing came back.
+	startTime time.Time
 }
+
+// kittyDetectionGrace is how long the picker waits before deciding a
+// terminal genuinely doesn't speak the Kitty keyboard protocol. The
+// terminal's reply to our \x1b[?u query typically arrives in <50 ms,
+// but we give some headroom to avoid a one-frame flash of the warning
+// on supporting terminals.
+const kittyDetectionGrace = 250 * time.Millisecond
+
+const kittyHelpURL = "https://terminaltrove.com/compare/terminals/?features=kitty-keyboard-protocol"
 
 func newPickerScene(e *engine.Engine, games []registry.Game) *pickerScene {
 	return &pickerScene{e: e, games: games}
 }
 
 func (p *pickerScene) Update(time.Duration) error {
+	if p.startTime.IsZero() {
+		p.startTime = time.Now()
+	}
 	for {
 		k, ok := p.e.PollKey()
 		if !ok {
@@ -81,9 +99,20 @@ func (p *pickerScene) Draw(c *engine.Canvas) {
 	}
 	c.Print(titleCol, 0, title, engine.White)
 
-	// List area sits between the title and the hint.
+	// Decide whether to show the "no Kitty keyboard" warning. Wait a
+	// little after startup so a supporting terminal's flags reply has
+	// time to arrive.
+	showWarning := !p.startTime.IsZero() &&
+		time.Since(p.startTime) > kittyDetectionGrace &&
+		!p.e.KittyKeyboardDetected()
+
+	// List area sits between the title and the hint, with the optional
+	// warning carved out of the bottom.
 	listTop := 2
-	listBottom := rows - 2
+	listBottom := rows - 2 // exclusive; row rows-1 is the hint
+	if showWarning {
+		listBottom = rows - 4 // make room for 2 warning lines at rows-3, rows-2
+	}
 	visibleRows := listBottom - listTop
 	if visibleRows < 1 {
 		visibleRows = 1
@@ -143,7 +172,37 @@ func (p *pickerScene) Draw(c *engine.Canvas) {
 		c.Print(cols-2, listBottom-1, "↓", engine.Cyan)
 	}
 
+	// Kitty-keyboard not-detected warning, if applicable.
+	if showWarning {
+		drawKittyWarning(c, rows-3)
+	}
+
 	// Hint footer.
 	hint := "↑↓ select   enter play   q quit"
 	c.Print((cols-utf8.RuneCountInString(hint))/2, rows-1, hint, engine.Gray)
+}
+
+// drawKittyWarning renders a two-line "no kitty kbd" message centred on
+// firstRow (line 1) and firstRow+1 (line 2). The terminal-trove URL is
+// shortened progressively when the canvas is narrower than the full
+// link.
+func drawKittyWarning(c *engine.Canvas, firstRow int) {
+	cols := c.Cols()
+	amber := engine.Color{R: 220, G: 160, B: 80, A: 255}
+	url := engine.Cyan
+
+	msg := "⚠  no kitty keyboard protocol — works best with a kitty-aware terminal"
+	if utf8.RuneCountInString(msg) > cols {
+		msg = "⚠  no kitty keyboard protocol"
+	}
+	c.Print((cols-utf8.RuneCountInString(msg))/2, firstRow, msg, amber)
+
+	link := kittyHelpURL
+	if utf8.RuneCountInString(link) > cols {
+		link = "terminaltrove.com/compare/terminals/"
+	}
+	if utf8.RuneCountInString(link) > cols {
+		link = "terminaltrove.com"
+	}
+	c.Print((cols-utf8.RuneCountInString(link))/2, firstRow+1, link, url)
 }
