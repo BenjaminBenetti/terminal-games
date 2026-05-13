@@ -97,12 +97,14 @@ type keyState struct {
 
 // keyHoldDecay is the legacy-terminal fallback timeout: how long a key is
 // considered "still held" after the last press/repeat event with no
-// explicit release. Tuned tight (250 ms) so released keys feel responsive
-// on legacy terminals — at the cost that a freshly pressed key may briefly
-// flicker to "up" before the kernel's auto-repeat starts firing (typical
-// initial repeat delay is also ~250–500 ms). Terminals with the Kitty
-// keyboard protocol bypass this timer entirely via isStateDown.
-const keyHoldDecay = 250 * time.Millisecond
+// explicit release. Tuned tight (100 ms) so released keys feel snappy on
+// legacy terminals. The trade-off is that a freshly pressed key will read
+// as "up" between the initial press event and the kernel's auto-repeat
+// kicking in (typical repeat delay is 250–500 ms), so movement on legacy
+// terminals can feel stuttery for the first frame or two until repeat
+// starts firing. Terminals with the Kitty keyboard protocol bypass this
+// timer entirely via isStateDown.
+const keyHoldDecay = 100 * time.Millisecond
 
 // New constructs an Engine from opts.
 func New(opts Options) (*Engine, error) {
@@ -157,7 +159,7 @@ func (e *Engine) Stop() {
 // so simultaneous keypresses (e.g. KeyUp + KeyRight for diagonal movement)
 // are reported accurately. On older terminals the engine falls back to an
 // auto-repeat heuristic: a key is "down" while press or repeat events keep
-// arriving and decays to "up" after ~250 ms of silence.
+// arriving and decays to "up" after ~100 ms of silence.
 //
 // Use IsCharDown for printable characters like 'w' or '1'.
 //
@@ -221,7 +223,7 @@ func (e *Engine) kittyEventsActive() bool {
 // observed at least one release event in practice. False means we're
 // falling back to the legacy auto-repeat heuristic, which can't reliably
 // detect simultaneous key presses (the OS only auto-repeats the most-
-// recently pressed key, so other "held" keys time out after ~250 ms).
+// recently pressed key, so other "held" keys time out after ~100 ms).
 func (e *Engine) KittyKeyboardDetected() bool {
 	if e.seenRelease.Load() {
 		return true
