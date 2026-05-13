@@ -29,6 +29,7 @@ import (
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/rallyx"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/scramble"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/spaceinvaders"
+	_ "github.com/BenjaminBenetti/terminal-games/internal/game/vanguard"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/starcastle"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/wizardofwor"
 
