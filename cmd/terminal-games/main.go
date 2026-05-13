@@ -12,6 +12,7 @@ import (
 	"os"
 
 	// Blank-import game packages here so their init() functions register them.
+	_ "github.com/BenjaminBenetti/terminal-games/internal/game/brickbreaker"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/enginedemo"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/spaceinvaders"
 
