@@ -21,6 +21,7 @@ import (
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/flappybird"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/galaga"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/galaxian"
+	_ "github.com/BenjaminBenetti/terminal-games/internal/game/gorf"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/lunarlander"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/magic8ball"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/pacman"
