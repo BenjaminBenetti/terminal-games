@@ -26,6 +26,7 @@ import (
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/magic8ball"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/pacman"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/pong"
+	_ "github.com/BenjaminBenetti/terminal-games/internal/game/qix"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/rallyx"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/scramble"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/spaceinvaders"
