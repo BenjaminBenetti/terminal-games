@@ -24,6 +24,7 @@ import (
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/pacman"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/pong"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/spaceinvaders"
+	_ "github.com/BenjaminBenetti/terminal-games/internal/game/starcastle"
 
 	"github.com/BenjaminBenetti/terminal-games/internal/engine"
 	"github.com/BenjaminBenetti/terminal-games/internal/registry"
