@@ -18,6 +18,7 @@ import (
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/enginedemo"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/flappybird"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/galaxian"
+	_ "github.com/BenjaminBenetti/terminal-games/internal/game/lunarlander"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/pacman"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/pong"
 	_ "github.com/BenjaminBenetti/terminal-games/internal/game/spaceinvaders"
